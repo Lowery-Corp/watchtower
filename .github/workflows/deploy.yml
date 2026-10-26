@@ -1,0 +1,194 @@
+name: Build and Deploy Watchtower
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watchtower-production
+  cancel-in-progress: true
+
+jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    environment: build and deploy
+
+    outputs:
+      api_image: ${{ steps.images.outputs.api_image }}
+      frontend_image: ${{ steps.images.outputs.frontend_image }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set image names
+        id: images
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME secret is required}"
+          {
+            printf 'api_image=%s/watchtower-api:%s\n' "$DOCKERHUB_USERNAME" "${GITHUB_SHA}"
+            printf 'frontend_image=%s/watchtower-frontend:%s\n' "$DOCKERHUB_USERNAME" "${GITHUB_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/watchtower-api:latest
+            ${{ steps.images.outputs.api_image }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/watchtower-frontend:latest
+            ${{ steps.images.outputs.frontend_image }}
+
+  deploy:
+    needs: build-images
+    runs-on: ubuntu-latest
+    environment: build and deploy
+
+    steps:
+      - name: Checkout deployment files
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Connect GitHub Actions to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          ping: ${{ secrets.SERVER_HOST }}
+
+      - name: Verify Tailscale SSH reachability
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail
+          : "${SERVER_HOST:?SERVER_HOST secret is required}"
+          tailscale status
+          tailscale ping "$SERVER_HOST"
+          timeout 10 bash -c "</dev/tcp/${SERVER_HOST}/22"
+
+      - name: Prepare deployment directory
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          SERVER_APP_DIR: ${{ secrets.SERVER_APP_DIR }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          protocol: tcp4
+          timeout: 1m
+          envs: SERVER_APP_DIR
+          script: |
+            set -eu
+            : "${SERVER_APP_DIR:?SERVER_APP_DIR secret is required}"
+            mkdir -p "$SERVER_APP_DIR/postgres/init"
+            echo "Deployment directory is ready"
+
+      - name: Copy Compose deployment files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          source: "docker-compose.yaml,docker-compose.deploy.yml,postgres/init/01-create-app-user.sh"
+          target: ${{ secrets.SERVER_APP_DIR }}
+          overwrite: true
+
+      - name: Deploy Compose stack over Tailscale
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SERVER_APP_DIR: ${{ secrets.SERVER_APP_DIR }}
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          protocol: tcp4
+          timeout: 1m
+          envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,SERVER_APP_DIR,IMAGE_TAG
+          script: |
+            set -eu
+            : "${SERVER_APP_DIR:?SERVER_APP_DIR secret is required}"
+            : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME secret is required}"
+            : "${DOCKERHUB_TOKEN:?DOCKERHUB_TOKEN secret is required}"
+            : "${IMAGE_TAG:?GitHub commit tag is required}"
+            cd "$SERVER_APP_DIR"
+
+            for required_file in \
+              .env \
+              docker-compose.yaml \
+              docker-compose.deploy.yml \
+              backend/.env \
+              frontend/.env; do
+              if [ ! -f "$required_file" ]; then
+                echo "Missing required deployment file: $SERVER_APP_DIR/$required_file" >&2
+                exit 1
+              fi
+            done
+            echo "Deployment files are present"
+
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USERNAME" \
+              --password-stdin
+
+            WATCHTOWER_API_IMAGE="${DOCKERHUB_USERNAME}/watchtower-api:${IMAGE_TAG}"
+            WATCHTOWER_FRONTEND_IMAGE="${DOCKERHUB_USERNAME}/watchtower-frontend:${IMAGE_TAG}"
+            export WATCHTOWER_API_IMAGE WATCHTOWER_FRONTEND_IMAGE
+            COMPOSE_FILES="-f docker-compose.yaml -f docker-compose.deploy.yml"
+
+            echo "Validating Compose configuration"
+            docker compose $COMPOSE_FILES config --quiet
+            echo "Pulling deployment images"
+            docker compose $COMPOSE_FILES pull
+            echo "Starting Watchtower services"
+            docker compose $COMPOSE_FILES up -d --no-build --remove-orphans
+
+            for attempt in $(seq 1 30); do
+              if docker compose $COMPOSE_FILES exec -T backend curl --fail --silent --show-error \
+                http://localhost:8000/api/v1/health; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                echo "Watchtower API health check did not pass after 60 seconds" >&2
+                docker compose $COMPOSE_FILES logs --tail=100 backend
+                exit 1
+              fi
+              sleep 2
+            done
+
+            docker compose $COMPOSE_FILES ps

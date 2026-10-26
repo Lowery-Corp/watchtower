@@ -11,7 +11,7 @@ current implementation and its known integration gaps are recorded in
 
 ## Stack
 
-- **Frontend:** React 19, Vite 7, JavaScript/JSX
+- **Frontend:** React 19, Vite 7, Tailwind CSS 4, JavaScript/JSX
 - **API:** Python 3.12, FastAPI, Uvicorn, Pydantic Settings
 - **Persistence:** PostgreSQL 17 (`pgvector/pgvector` image), SQLAlchemy 2,
   Alembic, `app` schema
@@ -28,6 +28,8 @@ watchtower/
 ├── AGENTS.md
 ├── APP_STRUCTURE_BLUEPRINT.md
 ├── docker-compose.yaml
+├── docker-compose.deploy.yml
+├── .github/workflows/deploy.yml
 ├── postgres/init/01-create-app-user.sh
 ├── backend/
 │   ├── main.py
@@ -87,8 +89,10 @@ Then start the services:
 docker compose up --build
 ```
 
-The frontend is available at `http://localhost:5173` and the API at
-`http://localhost:8000`. The frontend's **Check API health** link calls
+The frontend is available at `http://localhost:5173` by default and the API at
+`http://localhost:8000`. This checkout uses `FRONTEND_PORT=5174` and
+`BACKEND_PORT=8011` in its local `.env`, so its live URLs are
+`http://localhost:5174` and `http://localhost:8011`. The frontend's **Check API health** link calls
 `GET /api/v1/health`.
 
 Apply the checked-in migration from the backend container when the database is
@@ -128,16 +132,16 @@ allows credentialed CORS requests from the configured frontend origins in
 - The Compose files reference `.env` files, but only the backend and frontend
   examples are checked in; create the root file and local copies before
   starting Compose.
-- Redis is connected during FastAPI startup, but the backend service does not
-  declare a Compose health dependency on `cache`.
+- Redis is connected during FastAPI startup, and Compose now waits for the
+  `cache` health check before starting the backend.
 - Inside Compose, use the cache service's internal port (`cache:6379`) in
   `REDIS_URL`; `REDIS_PORT` only controls the host-published port.
 - Readiness is currently a static response and does not verify PostgreSQL or
   Redis.
 - The database migration creates `app.login_log`; the current login route does
   not write to that table.
-- The external auth contract and required production settings must be aligned
-  before enabling registration, admin checks, or internal callers. See the
+- The external auth contract still needs valid upstream credentials and route
+  behavior before registration or login can succeed end to end. See the
   blueprint's **Known integration gaps** section.
 
 ## Contribution guidance
@@ -145,6 +149,26 @@ allows credentialed CORS requests from the configured frontend origins in
 Read [`AGENTS.md`](AGENTS.md) before making changes. Keep the architecture
 blueprint current when adding routes, services, models, environment variables,
 or Compose dependencies.
+
+## Production deployment
+
+`.github/workflows/deploy.yml` follows the Vaults deployment pattern. On pushes
+to `main`, it builds and pushes immutable API and frontend images to Docker Hub,
+connects to the deployment host over Tailscale SSH, copies the Compose files,
+and starts the production stack with `docker-compose.deploy.yml`.
+
+Configure these GitHub Actions secrets in the `build and deploy` environment:
+
+- `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`
+- `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`
+- `SERVER_HOST`, `SERVER_USER`, `SERVER_SSH_KEY`, `SERVER_APP_DIR`
+
+Before the first deployment, provision these server-side files in
+`SERVER_APP_DIR`: `.env`, `backend/.env`, and `frontend/.env`. They contain
+database credentials, the external auth URL, and the browser-facing
+`VITE_API_URL`; they are intentionally not copied from GitHub. The deployment
+override removes development bind mounts, pulls the commit-tagged images, runs
+`alembic upgrade head`, and verifies `/api/v1/health` before the workflow exits.
 
 ## License
 

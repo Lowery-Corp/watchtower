@@ -13,7 +13,7 @@ not currently wired into a working flow.
 
 | Area | Technology |
 | --- | --- |
-| Frontend | React 19.1, Vite 7.1, JavaScript with JSX, CSS |
+| Frontend | React 19.1, Vite 7.1, Tailwind CSS 4, JavaScript with JSX |
 | API | Python 3.12, FastAPI 0.135, Uvicorn, Pydantic 2 |
 | HTTP client | HTTPX 0.28 with Tenacity retry policy |
 | Persistence | PostgreSQL 17-compatible `pgvector/pgvector:pg17`, SQLAlchemy 2 async, Alembic |
@@ -35,6 +35,8 @@ watchtower/
 ├── LICENSE
 ├── .gitignore
 ├── docker-compose.yaml
+├── docker-compose.deploy.yml
+├── .github/workflows/deploy.yml
 ├── postgres/
 │   └── init/
 │       └── 01-create-app-user.sh
@@ -98,10 +100,9 @@ Docker Compose defines the services `frontend`, `backend`, `postgres`, and
 PostgreSQL and Redis publish 5432 and 6379. Named volumes retain frontend
 `node_modules`, Redis data, and PostgreSQL data.
 
-Compose starts `backend` after PostgreSQL reports healthy and starts
+Compose starts `backend` after PostgreSQL and Redis report healthy and starts
 `frontend` after the backend reports healthy. The backend's FastAPI lifespan
-also pings Redis before yielding, but Compose does not currently express a
-`cache` health dependency for `backend`.
+also pings Redis before yielding.
 
 ## Root files
 
@@ -111,6 +112,8 @@ also pings Redis before yielding, but Compose does not currently express a
 | `AGENTS.md` | Repository-specific change, verification, and security instructions. |
 | `APP_STRUCTURE_BLUEPRINT.md` | This architecture and ownership reference. |
 | `docker-compose.yaml` | Builds the frontend/backend and wires PostgreSQL, Redis, ports, volumes, and health checks. |
+| `docker-compose.deploy.yml` | Production override that selects pushed images, removes source bind mounts, runs migrations, and disables reload mode. |
+| `.github/workflows/deploy.yml` | Builds/pushes commit-tagged images and deploys the Compose stack over Tailscale SSH. |
 | `postgres/init/01-create-app-user.sh` | Creates/updates the configured application role and `app` schema on first database initialization. |
 | `LICENSE` | MIT license. |
 | `.gitignore` | Ignores environment files, dependencies, build output, caches, and local database artifacts. |
@@ -236,28 +239,22 @@ These are observed facts about the current checkout, not planned behavior:
 1. **Environment bootstrap is incomplete.** Compose references a root `.env`,
    `backend/.env`, and `frontend/.env`, but only the two example files are
    tracked. The examples do not provide all required settings.
-2. **Settings and consumers are out of sync.** `auth/dependencies.py` reads
-   `settings.scrappys_api_key`, while `core/config.py` does not define it.
-   `internal_api_login` also references settings fields that are not declared.
-3. **Registration schema mismatch.** `UserCreate` exposes `username`, while
-   `register_route` reads `new_user.email`; the route will fail before a valid
-   registration request reaches the external auth API.
-4. **Cookie-key mismatch on logout.** Login/dependency code uses configurable
-   `COOKIE_KEY`, but logout deletes the literal `access_token` cookie.
-5. **Redis startup ordering is implicit.** FastAPI pings Redis at startup, but
-   backend Compose dependencies only wait for PostgreSQL.
-6. **Container and host ports differ.** Backend-to-cache traffic must use
+2. **Container and host ports differ.** Backend-to-cache traffic must use
    `cache:6379`; the `REDIS_PORT` variable controls only the host-published
    port and should not be used for container-to-container traffic.
-7. **Health is shallow.** Readiness does not check PostgreSQL, Redis, or the
+3. **External auth remains an integration dependency.** The configured upstream
+   service can reject requests before credentials or route contracts are
+   aligned; Watchtower now returns a structured failure instead of crashing on
+   non-JSON upstream responses.
+4. **Health is shallow.** Readiness does not check PostgreSQL, Redis, or the
    external auth service.
-8. **Database work is only partially wired.** SQLAlchemy sessions and the
+5. **Database work is only partially wired.** SQLAlchemy sessions and the
    `login_log` migration exist, but authentication is delegated upstream and
    no login event is recorded by the active route.
-9. **Unused scaffolding remains.** The admin guard, blacklist repository,
+6. **Unused scaffolding remains.** The admin guard, blacklist repository,
    Celery-related dependencies, and several broad requirements are not active
    application flows.
-10. **No automated tests are checked in.** Verification currently relies on
+7. **No automated tests are checked in.** Verification currently relies on
    static inspection, compilation/build checks, and manual Compose/API checks.
 
 When closing any of these gaps, update this document, the README, the relevant

@@ -1,0 +1,22 @@
+services:
+  postgres:
+    restart: unless-stopped
+
+  cache:
+    restart: unless-stopped
+
+  backend:
+    image: ${WATCHTOWER_API_IMAGE:-watchtower-api}
+    build: !reset []
+    volumes: !reset []
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+
+  frontend:
+    image: ${WATCHTOWER_FRONTEND_IMAGE:-watchtower-frontend}
+    build: !reset []
+    volumes: !reset []
+    restart: unless-stopped

@@ -24,10 +24,16 @@ services:
     command: python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     env_file:
       - ./backend/.env
+    environment:
+      # Container-to-container traffic uses the cache service port. REDIS_PORT
+      # controls only the host-published port below.
+      REDIS_URL: redis://cache:6379/0
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      cache:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]

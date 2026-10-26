@@ -1,6 +1,7 @@
 import uuid
 from typing import Any
 
+from httpx import HTTPError
 from httpxC.http_client import http_client
 from schemas.user import UserToken, AuthorizedUser
 from core.config import settings
@@ -58,11 +59,28 @@ async def blacklist_token(token: str) -> bool:
 
 async def register_user(email: str, password: str) -> dict[str, Any]:
     auth_endpoint: str = f"{settings.auth_api_url}/api/v1/users/create"
-    response = await http_client.post(
-        auth_endpoint,
-        json={"email": email, "password": password},
-    )
-    data = response.json()
+    try:
+        response = await http_client.post(
+            auth_endpoint,
+            json={"email": email, "password": password},
+        )
+    except HTTPError:
+        return {"ok": False, "error": "Authentication service unavailable"}
+
+    try:
+        data = response.json()
+    except ValueError:
+        return {
+            "ok": False,
+            "error": f"Authentication service returned HTTP {response.status_code}",
+        }
+
+    if response.is_error:
+        return {
+            "ok": False,
+            "error": data.get("message", f"Authentication service returned HTTP {response.status_code}"),
+        }
+
     if data.get("message") == "User with this email already exists":
         return {"ok": False, "error": data.get("message")}
 

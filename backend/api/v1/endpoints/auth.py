@@ -1,8 +1,6 @@
 from fastapi import APIRouter, Response, Request, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from db.dependencies import get_session
 from schemas.user import UserLogin, UserCreate, AuthorizedUser, LoginResponse
 from repositories.auth import (
     blacklist_token,
@@ -16,18 +14,18 @@ router = APIRouter(tags=["auth"])
 
 @router.post("/login")
 async def login_route(
-    UserLogin: UserLogin,
+    user_login: UserLogin,
     response: Response,
 ) -> LoginResponse | dict[str, str | bool]:
     try:
-        login_data = await login(UserLogin)
+        login_data = await login(user_login)
 
         response.set_cookie(
             key=settings.cookie_key,
             value=str(login_data.get("token")),
             httponly=True,
-            secure=True,      # True in production over HTTPS
-            samesite="lax",    # often fine for same-site frontend/backend
+            secure=settings.cookie_secure,
+            samesite="lax",
             max_age=60 * 60,
             expires=60 * 60,
             path="/",
@@ -39,7 +37,7 @@ async def login_route(
         user: LoginResponse = user_data
 
         return user
-    except Exception as e:
+    except Exception:
         response.status_code = 401
         return {"ok": False, "message": "Invalid username or password"}
 
@@ -53,7 +51,7 @@ async def read_me_route(
 
 @router.post("/logout")
 async def logout_route(response: Response, request: Request) -> dict[str, bool]:
-    token = request.cookies.get("access_token")
+    token = request.cookies.get(settings.cookie_key)
 
     if token:
         # decode token, get jti, store in blacklist table/cache
@@ -61,7 +59,7 @@ async def logout_route(response: Response, request: Request) -> dict[str, bool]:
         print("Blacklist status:", blacklist_status)
 
         response.delete_cookie(
-            key="access_token",
+            key=settings.cookie_key,
             path="/",
         )
         return {"ok": True}
@@ -71,15 +69,20 @@ async def logout_route(response: Response, request: Request) -> dict[str, bool]:
 @router.post("/register")
 async def register_route(
     new_user: UserCreate,
-    session: AsyncSession = Depends(get_session),
 ) -> dict[str, bool | str]:
-    user_created = await register_user(
-        email=new_user.email,
-        password=new_user.password,
-    )
+    try:
+        user_created = await register_user(
+            email=new_user.username,
+            password=new_user.password,
+        )
+    except Exception:
+        return {"ok": False, "message": "Authentication service unavailable"}
 
     if user_created.get("ok") is not True:
-        return {"ok": False, "message": user_created.get("error", "User creation failed")}
+        return {
+            "ok": False,
+            "message": str(user_created.get("error", "User creation failed")),
+        }
 
     return {"ok": True, "message": "User created successfully"}
 
