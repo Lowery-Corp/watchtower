@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Node dependencies and Vite output
+node_modules/
+frontend/dist/
+
 # C extensions
 *.so
 
