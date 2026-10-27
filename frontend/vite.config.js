@@ -5,6 +5,6 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    allowedHosts: ["dwatchtower.johnmgrubbs.io"],
+    allowedHosts: ["dwatchtower.johnmgrubbs.io", "watchtower.johnmgrubbs.io"],
   },
 });
