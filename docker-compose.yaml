@@ -15,6 +15,15 @@ services:
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:5173/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: always
+    labels:
+      autoheal: "true"
 
   backend:
     build:
@@ -41,6 +50,8 @@ services:
       timeout: 5s
       retries: 3
     restart: always
+    labels:
+      autoheal: "true"
     volumes:
       - ./backend:/app
 
@@ -55,6 +66,13 @@ services:
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: always
+    labels:
+      autoheal: "true"
 
   cache:
     image: redis:latest
@@ -69,6 +87,25 @@ services:
       timeout: 5s
       retries: 3
     restart: always
+    labels:
+      autoheal: "true"
+
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    network_mode: none
+    restart: always
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_ONLY_MONITOR_RUNNING: "true"
+      AUTOHEAL_INTERVAL: "10"
+      AUTOHEAL_START_PERIOD: "30"
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   frontend_node_modules:

@@ -1,9 +1,13 @@
 services:
   postgres:
     restart: unless-stopped
+    labels:
+      autoheal: "true"
 
   cache:
     restart: unless-stopped
+    labels:
+      autoheal: "true"
 
   backend:
     image: ${WATCHTOWER_API_IMAGE:-watchtower-api}
@@ -14,9 +18,13 @@ services:
       - -c
       - alembic upgrade head && python -m uvicorn main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
+    labels:
+      autoheal: "true"
 
   frontend:
     image: ${WATCHTOWER_FRONTEND_IMAGE:-watchtower-frontend}
     build: !reset []
     volumes: !reset []
     restart: unless-stopped
+    labels:
+      autoheal: "true"
